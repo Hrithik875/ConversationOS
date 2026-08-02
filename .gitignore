@@ -1,6 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Project instructions
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment
+*.local
+
+# Project instructions (never commit prompt files)
 phase-*-prompt.md
 phase-0-foundation-prompt.md
 phase-1-vault-prompt.md
+phase-2-import-engine-prompt.md
 
+# Sample data (test chat exports)
+*.zip
+
+# Temp scripts
+_inspect_zip.ps1
