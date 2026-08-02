@@ -39,7 +39,14 @@ export async function encrypt(
   const iv = crypto.getRandomValues(new Uint8Array(12))
 
   const encoded = new TextEncoder().encode(plaintext)
-  const ciphertextBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded)
+  const ciphertextBuffer = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer,
+    },
+    key,
+    encoded,
+  )
 
   return {
     ciphertext: bytesToBase64(new Uint8Array(ciphertextBuffer)),
@@ -65,9 +72,18 @@ export async function decrypt(ciphertext: string, iv: string, key: CryptoKey): P
   const ivBytes = base64ToBytes(iv)
 
   const plaintextBuffer = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: ivBytes },
+    {
+      name: 'AES-GCM',
+      iv: ivBytes.buffer.slice(
+        ivBytes.byteOffset,
+        ivBytes.byteOffset + ivBytes.byteLength,
+      ) as ArrayBuffer,
+    },
     key,
-    ciphertextBytes,
+    ciphertextBytes.buffer.slice(
+      ciphertextBytes.byteOffset,
+      ciphertextBytes.byteOffset + ciphertextBytes.byteLength,
+    ) as ArrayBuffer,
   )
 
   return new TextDecoder().decode(plaintextBuffer)

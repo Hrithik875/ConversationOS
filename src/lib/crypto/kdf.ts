@@ -92,7 +92,10 @@ export async function deriveKey(
 
   return crypto.subtle.importKey(
     'raw',
-    keyBytes,
+    keyBytes.buffer.slice(
+      keyBytes.byteOffset,
+      keyBytes.byteOffset + keyBytes.byteLength,
+    ) as ArrayBuffer,
     { name: 'AES-GCM', length: 256 },
     false, // non-extractable: key bytes cannot be read back out
     ['encrypt', 'decrypt'],
