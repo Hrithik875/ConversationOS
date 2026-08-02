@@ -97,7 +97,12 @@ export async function writeToOpfs(hash: string, encryptedBytes: Uint8Array): Pro
 
   // Use the standard writable stream API (works in main thread and workers).
   const writable = await fileHandle.createWritable()
-  await writable.write(encryptedBytes)
+  await writable.write(
+    encryptedBytes.buffer.slice(
+      encryptedBytes.byteOffset,
+      encryptedBytes.byteOffset + encryptedBytes.byteLength,
+    ) as ArrayBuffer,
+  )
   await writable.close()
 
   return `media/${hash}`
