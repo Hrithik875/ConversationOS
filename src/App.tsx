@@ -2,9 +2,13 @@ import { useEffect } from 'react'
 import { ThemeProvider } from '@/app/theme-provider'
 import { AutoLockProvider, ensureAutoLockSetting } from '@/app/AutoLockProvider'
 import { useVaultStore } from '@/stores/vaultStore'
+import { useImportStore } from '@/stores/importStore'
 import { VaultCreationScreen } from '@/modules/vault/VaultCreationScreen'
 import { VaultLockScreen } from '@/modules/vault/VaultLockScreen'
 import { VaultTestHarness } from '@/modules/vault/VaultTestHarness'
+import { ImportScreen } from '@/modules/import/ImportScreen'
+import { ImportProgress } from '@/modules/import/ImportProgress'
+import { ImportReport } from '@/modules/import/ImportReport'
 import { ThemeToggle } from '@/components/theme-toggle'
 
 /**
@@ -12,8 +16,7 @@ import { ThemeToggle } from '@/components/theme-toggle'
  *
  * 'no-vault'  → VaultCreationScreen (first-run flow)
  * 'locked'    → VaultLockScreen
- * 'unlocked'  → App shell placeholder (Phase 0 stub, replaced in future phases)
- *               + VaultTestHarness (dev only, temporary scaffolding)
+ * 'unlocked'  → UnlockedAppShell (import flow + dev tools)
  */
 function VaultRouter() {
   const status = useVaultStore((s) => s.status)
@@ -36,30 +39,38 @@ function VaultRouter() {
   return <UnlockedAppShell />
 }
 
-/** Placeholder app shell shown when vault is unlocked. */
+/**
+ * UnlockedAppShell — the main app surface when vault is unlocked.
+ *
+ * Routes between import states: idle (file picker), importing (progress),
+ * complete/error (report).
+ */
 function UnlockedAppShell() {
   const lock = useVaultStore((s) => s.lock)
+  const importStatus = useImportStore((s) => s.status)
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background p-6 text-center">
-      <div className="absolute top-4 right-4 flex items-center gap-2">
-        <button
-          onClick={lock}
-          className="rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition-colors"
-        >
-          Lock vault
-        </button>
-        <ThemeToggle />
-      </div>
-      <h1 className="text-4xl font-bold tracking-tight text-foreground sm:text-6xl">
-        ConversationOS
-      </h1>
-      <p className="mt-4 text-lg text-muted-foreground">
-        Vault unlocked · App shell placeholder (Phase 1)
-      </p>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Import, viewer, search, and other features will appear here in future phases.
-      </p>
+    <div className="flex min-h-svh flex-col bg-background">
+      {/* Top bar */}
+      <header className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h1 className="text-lg font-bold tracking-tight text-foreground">ConversationOS</h1>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={lock}
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition-colors"
+          >
+            Lock vault
+          </button>
+          <ThemeToggle />
+        </div>
+      </header>
+
+      {/* Main content */}
+      <main className="flex flex-1 items-center justify-center">
+        {importStatus === 'idle' && <ImportScreen />}
+        {importStatus === 'importing' && <ImportProgress />}
+        {(importStatus === 'complete' || importStatus === 'error') && <ImportReport />}
+      </main>
 
       {/* Round-trip test harness — dev only, temporary */}
       <VaultTestHarness />
