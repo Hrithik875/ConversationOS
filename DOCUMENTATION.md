@@ -152,3 +152,55 @@ git log --oneline
 - No passphrase change/rotation functionality yet.
 - No multi-vault support (app assumes a single global vault).
 - Test harness is purely temporary and exists as a UI component (VaultTestHarness.tsx) gated behind import.meta.env.DEV.
+
+---
+
+## Phase 2 — Import Engine
+
+**Date:** 2026-08-02
+
+### What was built
+
+Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) and encrypt it at rest inside the ConversationOS vault.
+
+- **Data Model (Dexie v5):** Added `chats`, `messages`, `media`, and `imports` tables.
+- **Zip Extraction (`fflate`):** Fast, worker-compatible zip decompression to extract the `_chat.txt` transcript and all attached media files.
+- **Message Parser:** A pure, robust transcript parser with format auto-detection.
+  - Automatically identifies Android 12h, Android 24h, iOS bracketed, and US date formats based on match rates.
+  - Handles system messages (e.g., encryption notices), deleted messages, and media attachments/omissions.
+  - Fixes WhatsApp's invisible Unicode injection (e.g., stripping LRM and narrow no-break space characters around timestamps).
+  - Merges multi-line messages seamlessly.
+- **Media Linking & OPFS Storage:**
+  - Media files are hashed (SHA-256) for deduplication.
+  - Encrypted with AES-GCM (raw bytes, no base64 overhead) using the vault key.
+  - Stored securely in the Origin Private File System (OPFS) via standard WritableStream APIs.
+- **Web Worker Orchestration:** The entire pipeline (unzip -> parse -> link media -> encrypt text -> encrypt media -> save to Dexie) runs inside a dedicated Web Worker (`import.worker.ts`). This guarantees the UI never freezes, even when processing massive chats.
+- **Import UI:** Added a drag-and-drop file picker, a live progress screen reporting exactly what the worker is doing, and a detailed post-import report showing message stats, matched media counts, and parse warnings.
+
+### Security & Privacy notes
+
+- **What is encrypted:** Message text content (stored in Dexie as base64 ciphertext + IV) and actual media bytes (stored in OPFS as raw AES-GCM encrypted bytes).
+- **What is NOT encrypted (Metadata tradeoff):** Timestamps, message types, chat IDs, and raw sender names are stored unencrypted in Dexie. This is a deliberate performance decision to allow sorting, filtering, and pagination of messages without having to decrypt thousands of rows upfront.
+- **Zero-knowledge constraint:** The `CryptoKey` from the vault store is transferred directly to the Web Worker for the duration of the import, ensuring encryption happens client-side without the key ever being persisted to disk.
+
+### Key decisions
+
+- **fflate over JSZip:** `fflate` is smaller, faster, and works seamlessly in Web Workers without polyfills.
+- **Vitest for parser logic:** The parser is a pure function. Vitest was added to provide a fast feedback loop for TDD, ensuring all the bizarre WhatsApp format edge cases (Android vs iOS) are correctly handled.
+- **OPFS for media:** IndexedDB is notoriously slow and memory-intensive for large binary blobs. Using OPFS provides native file-system-like performance while still being constrained to the browser's origin sandbox.
+
+### How to verify this phase
+
+1. Run `pnpm dev`. Unlock the vault.
+2. The Import UI will be presented.
+3. Drag and drop a WhatsApp `.zip` export (ensure it contains media).
+4. Watch the progress bar advance without the UI freezing.
+5. Review the final Import Report (Message counts should match roughly the number of lines in the text file minus multi-line continuations).
+6. Verify in DevTools (Application -> IndexedDB) that `messages.encryptedContent` is unreadable base64 text, and that `messages.content` does not exist.
+7. Verify in DevTools (Application -> Storage) that OPFS contains files under `/media` with SHA-256 filenames.
+
+### Known limitations / deferred items
+
+- The "View Chat" button in the import report is disabled. The actual chat viewer interface is slated for Phase 3.
+- Participant names are currently stored exactly as they appear in the transcript text file (which often depends on how the user saved the contact). Contact resolution and renaming is deferred.
+- No support yet for standalone `.txt` imports without a zip file.
