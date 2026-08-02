@@ -108,3 +108,47 @@ git log --oneline
 - **No actual Dexie tables:** The database scaffold is empty by design. Tables will be added per-feature in later phases.
 - **CI pnpm version:** CI uses pnpm v9 (via `pnpm/action-setup`). Local development uses pnpm v11. This may need alignment.
 - **`tailwind.config.js` and `postcss.config.js`:** These files were generated during the TailwindCSS v3 → v4 migration attempts. They may be unused by Tailwind v4 (which uses the Vite plugin) but are kept for compatibility with shadcn's detection.
+
+---
+
+## Phase 1 � Vault (Passphrase Lock & Encryption)
+
+**Date:** 2026-08-02
+
+### What was built
+
+- **Vault Data Model:** Added aultMeta and settings tables to Dexie for storing KDF parameters, random salt, encrypted verifier blobs, and auto-lock timeout.
+- **Crypto Core:** Implemented Argon2id key derivation using hash-wasm and AES-256-GCM encryption/decryption using the native Web Crypto API (crypto.subtle).
+- **Verifier System:** Developed an encrypted known-plaintext proof system to verify passphrases on unlock without storing them.
+- **Vault Store:** Created a Zustand session store (aultStore.ts) strictly without persistence middleware to ensure derived keys only exist in memory and are discarded on tab close/refresh.
+- **Auto-Lock:** Added AutoLockProvider to lock the vault after a default 15 minutes of inactivity.
+- **Vault UI:** Built a first-run vault creation flow (with zxcvbn passphrase strength check and confirmation checkbox) and a lock screen with a rate-limiting cooldown (exponential backoff after 5 attempts).
+- **Test Harness:** Created a dev-only VaultTestHarness to verify the round-trip encryption flow (encrypt -> store -> reload -> unlock -> decrypt).
+
+### Security reasoning
+
+- **Key Derivation (Argon2id over PBKDF2):** Argon2id is the modern standard (RFC 9106) and offers resistance against GPU/ASIC parallel brute-force attacks via configurable memory hardness, unlike PBKDF2 which is purely CPU-bound.
+- **KDF Params:** Chosen memory: 64MB (65536 KiB), iterations: 3, parallelism: 1. These parameters are specifically chosen to cause a ~1-2 second derivation delay in standard browser WASM. This friction defends against brute-force attacks on the derived key, while remaining usable for unlocking the app.
+- **Rate-Limiting Limits:** The UI enforces an exponential backoff on incorrect passphrases. However, this deterrent does NOT protect against offline attacks if an attacker gains access to the local IndexedDB. The true defense is the high Argon2id cost.
+- **No Key Persistence:** The derived AES-GCM CryptoKey is intentionally never persisted. By avoiding localStorage, sessionStorage, or IndexedDB, closing the tab naturally flushes the key from JS memory.
+
+### Key decisions
+
+- Integrated hash-wasm instead of an external WASM port for Argon2id due to its direct browser compatibility and MIT license.
+- Handled a TypeScript mismatch with Uint8Array in crypto.subtle.encrypt/decrypt by ensuring arguments are cast strictly via uffer.slice(...) as ArrayBuffer.
+
+### How to verify this phase
+
+1. **Creation:** Open the app. The creation screen appears. Passphrases scoring < 3 on zxcvbn are rejected. Checking the "I understand" box is required.
+2. **Key Storage:** Create a vault -> it unlocks -> refresh the page -> it immediately locks because the key was wiped from memory.
+3. **Unlock (Wrong):** Enter a wrong passphrase -> a generic "Incorrect passphrase" error is shown.
+4. **Rate Limit:** Enter a wrong passphrase 6 times -> the UI displays an increasing timeout cooldown before the next attempt is allowed.
+5. **Unlock (Correct):** Enter the correct passphrase -> vault unlocks.
+6. **Round-Trip Test:** Once unlocked (in dev mode), click "Encrypt sample string". Refresh the page. Unlock. Click "Decrypt stored ciphertext". The output will confirm a perfect match.
+7. **Auto-Lock:** Wait 15 minutes (or edit imeoutMsRef.current to 5000ms temporarily and wait 5 seconds) -> app automatically redirects to the lock screen.
+
+### Known limitations / deferred items
+
+- No passphrase change/rotation functionality yet.
+- No multi-vault support (app assumes a single global vault).
+- Test harness is purely temporary and exists as a UI component (VaultTestHarness.tsx) gated behind import.meta.env.DEV.
