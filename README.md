@@ -1,32 +1,44 @@
-# React + TypeScript + Vite
+# ConversationOS
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+> Privacy-first, offline-first conversation archive platform.
 
-Currently, two official plugins are available:
+## Status
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+**Phase 0 — Foundation**
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Package manager:** pnpm
+- **Framework:** React 19 + TypeScript + Vite
+- **Styling:** TailwindCSS + shadcn/ui + Radix UI primitives
+- **Animation:** Framer Motion _(coming in later phases)_
+- **State management:** Zustand
+- **Routing:** React Router v6
+- **PWA:** vite-plugin-pwa
+- **Local storage:** Dexie.js (IndexedDB wrapper)
+- **Linting/formatting:** ESLint + Prettier + Husky + lint-staged
+- **CI:** GitHub Actions
+- **License:** MPL-2.0
 
-## Expanding the Oxlint configuration
+## Getting Started
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+pnpm install
+pnpm dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Available Scripts
+
+| Script           | Description                  |
+| ---------------- | ---------------------------- |
+| `pnpm dev`       | Start dev server             |
+| `pnpm build`     | Production build             |
+| `pnpm preview`   | Preview production build     |
+| `pnpm lint`      | Run ESLint                   |
+| `pnpm lint:fix`  | Run ESLint with auto-fix     |
+| `pnpm format`    | Format code with Prettier    |
+| `pnpm typecheck` | Run TypeScript type checking |
+
+## License
+
+[MPL-2.0](LICENSE)
