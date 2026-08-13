@@ -15,6 +15,13 @@ export default defineConfig({
       devOptions: {
         enabled: true,
       },
+      // Exclude large ONNX runtime WASM files (from @huggingface/transformers)
+      // from the Workbox precache manifest. These files are 20+ MB and should
+      // be served via normal HTTP browser caching, not SW precaching.
+      workbox: {
+        maximumFileSizeToCacheInBytes: 25 * 1024 * 1024, // 25 MB limit
+        globIgnores: ['**/*.wasm'],
+      },
       manifest: {
         name: 'ConversationOS',
         short_name: 'ConversationOS',

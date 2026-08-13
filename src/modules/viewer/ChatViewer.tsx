@@ -4,21 +4,32 @@
  * Combines the message list with a chat header showing:
  * - Chat title and participant info
  * - Self-participant selection trigger
+ * - Search icon button (opens global search panel)
  * - Back button to return to sidebar
  *
+ * Accepts a `scrollToMessageId` prop for search result navigation.
  * Prompts for self-participant selection on first open.
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { db } from '@/lib/db'
 import { useViewerStore } from '@/stores/viewerStore'
+import { useSearchStore } from '@/stores/searchStore'
 import { MessageList } from './MessageList'
 import { SelfParticipantModal } from './SelfParticipantModal'
 import type { Chat } from '@/types/import'
 
-export function ChatViewer() {
+interface ChatViewerProps {
+  /** When set, the message list scrolls to this message ID (from search). */
+  scrollToMessageId?: number | null
+  /** Called after scroll navigation completes so the parent can clear the prop. */
+  onScrollToComplete?: () => void
+}
+
+export function ChatViewer({ scrollToMessageId, onScrollToComplete }: ChatViewerProps) {
   const activeChatId = useViewerStore((s) => s.activeChatId)
   const deselectChat = useViewerStore((s) => s.deselectChat)
+  const openSearch = useSearchStore((s) => s.openSearch)
   const [chat, setChat] = useState<Chat | null>(null)
   const [showParticipantModal, setShowParticipantModal] = useState(false)
   const [loaded, setLoaded] = useState(false)
@@ -124,6 +135,23 @@ export function ChatViewer() {
           </p>
         </div>
 
+        {/* Search button */}
+        <button
+          id="chat-search-button"
+          onClick={openSearch}
+          className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          title="Search messages (Ctrl+K)"
+        >
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+            />
+          </svg>
+        </button>
+
         {/* Self-participant selector */}
         <button
           onClick={() => setShowParticipantModal(true)}
@@ -139,7 +167,12 @@ export function ChatViewer() {
       </header>
 
       {/* Message list */}
-      <MessageList chatId={activeChatId} selfParticipant={chat.selfParticipant ?? null} />
+      <MessageList
+        chatId={activeChatId}
+        selfParticipant={chat.selfParticipant ?? null}
+        scrollToMessageId={scrollToMessageId}
+        onScrollToComplete={onScrollToComplete}
+      />
 
       {/* Self-participant modal */}
       {showParticipantModal && (

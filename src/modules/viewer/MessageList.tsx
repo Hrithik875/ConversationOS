@@ -27,19 +27,29 @@ const DECRYPT_FAILED = '\x00DECRYPT_FAILED\x00'
 interface MessageListProps {
   chatId: number
   selfParticipant: string | null
+  /** When set, the virtualizer scrolls to this message ID and briefly highlights it. */
+  scrollToMessageId?: number | null
+  /** Called after scroll-to has been performed (so parent can clear the prop). */
+  onScrollToComplete?: () => void
 }
 
 /** A row in the virtual list — either a date separator or a message. */
 type ListRow =
   { kind: 'date'; label: string } | { kind: 'message'; message: Message; decrypted: string | null }
 
-export function MessageList({ chatId, selfParticipant }: MessageListProps) {
+export function MessageList({
+  chatId,
+  selfParticipant,
+  scrollToMessageId,
+  onScrollToComplete,
+}: MessageListProps) {
   const [allMessages, setAllMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(true)
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const derivedKey = useVaultStore((s) => s.derivedKey)
   const parentRef = useRef<HTMLDivElement>(null)
   const [decryptedMap, setDecryptedMap] = useState<Map<number, string>>(new Map())
+  const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null)
 
   // Load all messages for this chat (sorted by sortIndex)
   useEffect(() => {
@@ -96,6 +106,24 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
       })
     }
   }, [loading, rows.length, virtualizer])
+
+  // Scroll to a specific message when requested (from search navigation).
+  useEffect(() => {
+    if (!scrollToMessageId || loading || rows.length === 0) return
+    const rowIndex = rows.findIndex(
+      (r) => r.kind === 'message' && r.message.id === scrollToMessageId,
+    )
+    if (rowIndex === -1) return
+    requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(rowIndex, { align: 'center' })
+      setHighlightedMessageId(scrollToMessageId)
+      // Remove highlight after 2 seconds.
+      setTimeout(() => setHighlightedMessageId(null), 2000)
+      onScrollToComplete?.()
+    })
+    // onScrollToComplete intentionally excluded — it's a stable callback ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToMessageId, loading, rows, virtualizer])
 
   // Decrypt visible messages lazily.
   //
@@ -227,6 +255,7 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
                     decrypted={row.decrypted}
                     selfParticipant={selfParticipant}
                     onImageClick={setLightboxUrl}
+                    isHighlighted={row.message.id === highlightedMessageId}
                   />
                 )}
               </div>
@@ -255,9 +284,17 @@ interface MessageRowProps {
   decrypted: string | null
   selfParticipant: string | null
   onImageClick: (url: string) => void
+  /** Briefly highlight this row when navigated to from a search result. */
+  isHighlighted?: boolean
 }
 
-function MessageRow({ message, decrypted, selfParticipant, onImageClick }: MessageRowProps) {
+function MessageRow({
+  message,
+  decrypted,
+  selfParticipant,
+  onImageClick,
+  isHighlighted,
+}: MessageRowProps) {
   const isSelf = selfParticipant !== null && message.senderRaw === selfParticipant
 
   // Distinguish loading (null → '...') from a genuine decryption failure
@@ -265,13 +302,22 @@ function MessageRow({ message, decrypted, selfParticipant, onImageClick }: Messa
   const isDecryptFailed = decrypted === DECRYPT_FAILED
   const content = isDecryptFailed ? '⚠ Failed to decrypt' : (decrypted ?? '...')
 
+  // Highlight ring when navigated to from a search result.
+  const highlightClass = isHighlighted
+    ? 'rounded-lg ring-2 ring-amber-400/70 ring-offset-1 transition-all duration-300'
+    : ''
+
   if (message.type === 'system') {
-    return <SystemBubble content={content} />
+    return (
+      <div className={highlightClass}>
+        <SystemBubble content={content} />
+      </div>
+    )
   }
 
   if (message.type === 'deleted') {
     return (
-      <div className="py-0.5">
+      <div className={`py-0.5 ${highlightClass}`}>
         <DeletedBubble content={content} timestamp={message.timestamp} isSelf={isSelf} />
       </div>
     )
@@ -279,7 +325,7 @@ function MessageRow({ message, decrypted, selfParticipant, onImageClick }: Messa
 
   if (message.type === 'media') {
     return (
-      <div className="py-0.5">
+      <div className={`py-0.5 ${highlightClass}`}>
         <MediaBubble
           content={content}
           senderRaw={message.senderRaw}
@@ -294,7 +340,7 @@ function MessageRow({ message, decrypted, selfParticipant, onImageClick }: Messa
 
   // text
   return (
-    <div className="py-0.5">
+    <div className={`py-0.5 ${highlightClass}`}>
       <TextBubble
         content={content}
         senderRaw={message.senderRaw}
