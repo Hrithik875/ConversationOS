@@ -8,6 +8,9 @@
 import { create } from 'zustand'
 import { clearDecryptionCache } from '@/lib/viewer/decryptionCache'
 import { clearMediaCache } from '@/lib/viewer/mediaCache'
+import { clearFulltextIndex } from '@/lib/search/fulltextIndex'
+import { clearSemanticIndex } from '@/lib/search/semanticIndex'
+import { useSearchStore } from '@/stores/searchStore'
 
 interface ViewerState {
   /** Currently active chat ID, or null if no chat is selected. */
@@ -20,8 +23,13 @@ interface ViewerState {
   deselectChat: () => void
 
   /**
-   * Clear all viewer state. Called when the vault locks.
-   * Also clears the decryption and media caches.
+   * Clear all viewer and search state. Called when the vault locks.
+   * Clears:
+   *   - Phase 3: decryption cache and media cache
+   *   - Phase 4: in-memory fulltext index and decrypted embedding vectors
+   *
+   * SECURITY NOTE: Encrypted embedding vectors remain in Dexie (they are
+   * encrypted at rest). Only the in-memory plaintext forms are cleared here.
    */
   clearViewer: () => void
 }
@@ -34,8 +42,14 @@ export const useViewerStore = create<ViewerState>()((set) => ({
   deselectChat: () => set({ activeChatId: null }),
 
   clearViewer: () => {
+    // Phase 3 caches
     clearDecryptionCache()
     clearMediaCache()
+    // Phase 4 in-memory indexes (workers terminated, vectors wiped)
+    clearFulltextIndex()
+    clearSemanticIndex()
+    // Search UI state
+    useSearchStore.getState().clearSearch()
     set({ activeChatId: null })
   },
 }))
