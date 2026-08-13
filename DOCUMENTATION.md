@@ -339,3 +339,85 @@ Together: the callback is stable and correct, and scroll → decrypt is now wire
 - No message remained permanently on `...`.
 - Deliberately corrupted a stored `encryptedContent` value in DevTools IndexedDB → the affected message showed `⚠ Failed to decrypt` (distinct from `...`) and a `console.error` was logged with the message ID and error details.
 - `npm run lint`, `npm run typecheck`, `npm run build` all pass with zero errors or warnings.
+
+---
+
+## Phase 4 — Search (Full-Text + Local Semantic AI)
+
+**Date:** 2026-08-13
+**Branch:** `feature/search-schema` → merged to `develop`
+
+### What was built
+
+Phase 4 adds full-archive keyword search via MiniSearch and embedding-based semantic search via Transformers.js (`Xenova/all-MiniLM-L6-v2`), both running entirely in the browser at zero API cost.
+
+### Database schema change
+
+- **Version 6** added the `embeddings` table to Dexie: `{ id?, messageId, encryptedVector, iv, modelVersion }`.
+  - Indexed on `messageId` (O(1) lookup) and `modelVersion` (stale-vector detection on model upgrade).
+  - SECURITY NOTE: embedding vectors are derived from plaintext message content and are therefore treated as sensitive. They are AES-256-GCM encrypted with the vault key before storage. The plaintext `Float32Array` lives only in session memory, never on disk.
+
+### Full-text search
+
+- **`src/types/search.ts`** — Shared type definitions: `SearchResult`, `SearchMode`, `IndexableMessage`, `EmbeddingEntry`, and the complete worker message protocol types for both workers.
+- **`src/workers/fulltextIndex.worker.ts`** — Web Worker that builds and queries an in-memory MiniSearch index. Receives pre-decrypted `IndexableMessage[]` from the main thread (decryption happens in the main thread using the existing `decrypt()` function). Supports BM25 scoring, fuzzy matching (`fuzz=0.2`), and prefix queries. Returns `SearchResult[]` with character-level highlight ranges computed from query term positions.
+- **`src/lib/search/fulltextIndex.ts`** — Main-thread wrapper: manages worker lifecycle, decrypts all messages (with concurrency limit of 50 parallel calls to avoid OOM), sends them to the worker, and routes search queries. Exposes `buildFulltextIndex(key)`, `searchFulltext(query)`, `isFulltextReady()`, `clearFulltextIndex()`.
+
+### Semantic search
+
+- **`src/workers/embedding.worker.ts`** — Web Worker using `@huggingface/transformers`. Loads `Xenova/all-MiniLM-L6-v2` (quantized `q8`, ~23 MB download, cached by browser after first load). Generates 384-dimensional float32 embedding vectors using the pipeline's built-in `pooling: 'mean', normalize: true` — no manual pooling code needed. Transfers `Float32Array` buffers back to the main thread for encryption (zero-copy transfer). Also handles query embedding on demand.
+- **`src/lib/search/semanticIndex.ts`** — Main-thread module handling: (1) **Generation**: finds un-embedded messages, decrypts their content, sends to embedding worker in batches of 64, receives vectors, encrypts them, stores in `db.embeddings`. (2) **Session load**: on unlock, reads all stored `EmbeddingEntry` rows for the current model version, decrypts them into an in-memory `Float32Array[]`. (3) **Search**: embeds the query via worker, computes cosine similarity against the in-memory vector store (O(n) dot products — vectors are already L2-normalized), returns top-K results. Exposes `loadEmbeddingSession(key)`, `generateMissingEmbeddings(key)`, `searchSemantic(query, topK, key)`, `clearSemanticIndex()`.
+- Embedding generation is **resumable**: on subsequent unlocks, only messages without an existing `embeddings` row (for the current `modelVersion`) are processed. Re-importing a chat triggers generation only for newly added messages.
+
+### Search store
+
+- **`src/stores/searchStore.ts`** — New Zustand store (session-only, not persisted): `isSearchOpen`, `fulltextStatus`, `embeddingStatus`, `embeddingDone`, `embeddingTotal`. Cleared via `clearSearch()` on vault lock.
+
+### Search UI
+
+- **`src/modules/search/SearchPanel.tsx`** — Full-screen overlay panel (backdrop blur, slide-in modal) with:
+  - Single search input with autofocus and Escape-to-close.
+  - Mode toggle: `keyword` | `semantic` | `both`.
+  - Results list (up to 50) with: chat title, sender, date, snippet. Keyword results show inline character-level highlight marks (`<mark>`). Semantic results show a "✨ semantic" badge. In `both` mode, sections are grouped separately.
+  - Live semantic indexing progress indicator when embedding is incomplete.
+  - Click navigates to the correct message in its chat.
+- **`src/modules/viewer/MessageList.tsx`** — Added `scrollToMessageId` and `onScrollToComplete` props. When set, uses `virtualizer.scrollToIndex()` to scroll to the target message row (`align: 'center'`) and shows a 2-second amber ring highlight (`ring-2 ring-amber-400/70`) via the new `isHighlighted` prop on `MessageRow`.
+- **`src/modules/viewer/ChatViewer.tsx`** — Added search icon button in the chat header (triggers `openSearch()`), and accepts + forwards `scrollToMessageId`/`onScrollToComplete` to `MessageList`.
+- **`src/App.tsx`** — Major additions:
+  - Global **Ctrl+K / Cmd+K** keyboard shortcut opens the search panel.
+  - Search button with shortcut hint in the top bar.
+  - After unlock, eagerly calls `buildFulltextIndex(derivedKey)` and `loadEmbeddingSession(derivedKey)` → `generateMissingEmbeddings(derivedKey)` in background.
+  - After import completes (`importStatus === 'complete'`), triggers re-index for newly imported messages.
+  - `handleSearchNavigate(chatId, messageId)`: selects the chat, then sets `pendingScrollMessageId` after a 100 ms delay to let the chat load.
+  - Renders `<SearchPanel onNavigate={handleSearchNavigate} />` as a global overlay.
+
+### Lock/session integration
+
+- **`src/stores/viewerStore.ts`** — `clearViewer()` now also calls `clearFulltextIndex()` and `clearSemanticIndex()`. This terminates both workers (no plaintext survives in worker memory) and clears the in-memory vector store. The encrypted Dexie rows remain intact for the next session.
+
+### PWA config change
+
+- **`vite.config.ts`** — Added `workbox.globIgnores: ['**/*.wasm']` and raised `maximumFileSizeToCacheInBytes` to 25 MB. The ONNX runtime WASM file from `@huggingface/transformers` is ~23.6 MB and is not appropriate to precache in the service worker; it is served via normal HTTP caching instead.
+
+### New dependencies
+
+- `minisearch` — BM25 in-memory full-text search, zero dependency, browser-safe.
+- `@huggingface/transformers` — Transformers.js v3, the officially maintained successor to `@xenova/transformers`. Same API and model support.
+
+### Architecture tradeoffs
+
+| Concern                   | Decision                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Keyword index persistence | In-memory only. Rebuilt from scratch after each unlock (~1-2s for 5k msgs). Zero additional storage cost.                                 |
+| Embedding persistence     | Encrypted at rest in Dexie `embeddings` table. Decrypted to memory on unlock. Resumable generation.                                       |
+| Indexing thread           | Both MiniSearch build and embedding generation run in dedicated Web Workers to avoid blocking the UI.                                     |
+| Embedding compute         | `q8` quantized model (~23 MB first download, zero-cost thereafter). Runs entirely on-device via WASM.                                     |
+| Search sensitivity        | Both keyword and semantic indexes contain or are derived from message plaintext. Treated as equally sensitive to the messages themselves. |
+
+### How it was verified
+
+- `npm run lint`, `npm run typecheck`, `npm run build` all pass with zero errors.
+- Build output confirms both workers compile to separate chunks (`fulltextIndex.worker.js`, `embedding.worker.js`).
+- `db.embeddings` table confirmed in DevTools → IndexedDB → ConversationOSDatabase (v6 schema).
+- Vault lock → `clearViewer()` → search panel closes immediately, indexes cleared, workers terminated.
+- Unlock → fulltext index rebuilds in background; `embeddingStatus` transitions from `idle` → `loading-model` → `indexing` → `ready`.
