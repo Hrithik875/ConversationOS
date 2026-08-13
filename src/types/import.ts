@@ -63,6 +63,12 @@ export interface Chat {
   messageCount: number
   /** FK to the imports table — which import produced this chat. */
   importId: number
+  /**
+   * Which participant the user identifies as in this chat.
+   * Drives message alignment (own messages → right, others → left).
+   * Set via self-participant selection on first chat open (Phase 3).
+   */
+  selfParticipant?: string
 }
 
 /**
