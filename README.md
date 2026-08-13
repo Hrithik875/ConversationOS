@@ -4,7 +4,7 @@
 
 ## Status
 
-**Phase 0 — Foundation**
+**Phase 3 — Chat Viewer**
 
 ## Tech Stack
 

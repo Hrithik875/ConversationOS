@@ -204,3 +204,86 @@ Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) an
 - The "View Chat" button in the import report is disabled. The actual chat viewer interface is slated for Phase 3.
 - Participant names are currently stored exactly as they appear in the transcript text file (which often depends on how the user saved the contact). Contact resolution and renaming is deferred.
 - No support yet for standalone `.txt` imports without a zip file.
+
+---
+
+## Phase 3 — Chat Viewer
+**Date:** 2026-08-13
+
+### What was built
+
+Phase 3 delivers the core reading experience — the ability to view imported chats with proper message rendering, media display, and a responsive sidebar layout.
+
+**Chat sidebar (`ChatSidebar.tsx`):**
+- Queries the `chats` table and renders each imported chat with title, participant names, message count, and a lazy-decrypted last-message preview.
+- Last-message preview decrypts only the most recent message per chat on demand via `getCachedDecryption()`, not the entire chat.
+- Clicking a chat sets it as the active chat in `viewerStore`. Empty state shows a prompt to import a chat.
+
+**Self-participant selection (`SelfParticipantModal.tsx`):**
+- On first chat open, prompts the user: "Which participant are you?" with the detected sender names as options.
+- Stores the selection as `selfParticipant` on the `chats` record in Dexie.
+- Drives message alignment: own messages → right, others → left.
+- Accessible at any time from the chat header to change the selection.
+
+**Decryption cache (`decryptionCache.ts`):**
+- In-memory FIFO cache mapping `messageId → decryptedPlaintext` with a max size of 2,000 entries (~60 screens of content).
+- FIFO eviction approximates LRU well for sequential scroll access patterns.
+- Cache clears entirely on vault lock via `viewerStore.clearViewer()`.
+
+**Media cache (`mediaCache.ts`):**
+- In-memory cache mapping `mediaId → objectURL` with a max size of 100 entries.
+- On eviction, `URL.revokeObjectURL()` is called to free the Blob and prevent memory leaks.
+- On vault lock, `clearMediaCache()` revokes all object URLs and empties the cache.
+
+**Viewer store (`viewerStore.ts`):**
+- Zustand session store (not persisted) tracking `activeChatId`.
+- `clearViewer()` clears both decryption and media caches plus resets the active chat.
+- Hooked to vault lock in `App.tsx` — when the vault locks, `clearViewer()` fires immediately.
+
+**Virtualized message list (`MessageList.tsx`):**
+- Messages are fetched from Dexie sorted by `sortIndex` and rendered via `@tanstack/react-virtual`.
+- Decryption is lazy: only messages in/near the viewport are decrypted via the decryption cache, with results stored in a local `Map<messageId, plaintext>`.
+- Day grouping with date separators ("Today", "Yesterday", "12 January 2024") using sticky pill-style labels.
+- Scroll-to-bottom on initial load.
+- `overscan: 15` provides buffer for smooth scroll experience.
+
+**Message bubble components:**
+- `TextBubble`: Sender name (colorized by hash), timestamp, linkified URLs, preserved line breaks, left/right alignment.
+- `SystemBubble`: Centered pill/label style for system messages (e.g. "Alice added Bob").
+- `DeletedBubble`: Italic, muted, dashed-border style with a "blocked" icon. Never fabricates deleted content.
+- `MediaBubble`: Handles all media types:
+  - **Images (matched):** Decrypted from OPFS, rendered inline. Click opens lightbox.
+  - **Missing media (`matched: false`):** Amber placeholder — "Media not found in export" + original filename.
+  - **Media omitted (no `mediaRef`):** Italic caption with the original `<Media omitted>` text.
+  - **Non-image media (video/audio/documents):** Generic fallback with file-type icon, filename, size, and a decrypt-and-download button.
+
+**Image lightbox (`ImageLightbox.tsx`):**
+- Full-screen overlay with backdrop blur. Close via × button, Escape key, or backdrop click.
+- Prevents body scroll while open.
+- Single-image view (gallery navigation deferred).
+
+**App shell integration (`App.tsx`):**
+- Layout: fixed header with lock button + theme toggle, sidebar (280px, hidden on mobile when chat is open), main content area.
+- Route guard: the viewer is only accessible inside `UnlockedAppShell`, which only renders when `vaultStore.status === 'unlocked'`. Direct navigation while locked renders the lock screen.
+- Import flow (progress/report) takes precedence over the viewer when active.
+
+### Decryption/caching strategy
+
+- **Text cache:** FIFO with 2,000-entry cap. Chosen because scroll access is predominantly sequential (scrolling through a chat), making FIFO a reasonable approximation of LRU. 2,000 entries ≈ 60 screens of messages at ~33 messages/screen, providing ample buffer for bi-directional scroll without excessive memory use.
+- **Media cache:** 100-entry cap with `URL.revokeObjectURL()` on eviction. 100 entries limits memory to roughly 100 in-memory image Blobs, which is generous for typical viewport sizes.
+- **Cache clearing on vault lock:** Both caches clear immediately when the vault locks. `viewerStore.clearViewer()` is called in the vault lock handler, ensuring no decrypted plaintext or media object URLs survive past lock.
+
+### Performance notes
+
+- Virtualization confirmed: `@tanstack/react-virtual` with `overscan: 15` keeps DOM node count bounded regardless of chat size. A chat with 10,000+ messages renders the same number of DOM nodes as a chat with 50 messages.
+- Message metadata (timestamps, types, sender names, encrypted content strings) is loaded from Dexie in a single query per chat. For very large chats (50,000+ messages), this could consume noticeable memory. True cursor-based pagination is deferred as a performance optimization for a later phase.
+- Image decryption involves OPFS reads + AES-GCM decrypt + Blob creation. Object URLs are cached to avoid re-decryption when scrolling back.
+
+### Known limitations / deferred items
+
+- **Single-image lightbox only:** No gallery navigation between media messages. Deferred to a later phase.
+- **Non-image media is download-only:** Video, audio, and documents show a generic fallback with a download button. Inline players are deferred.
+- **No search:** Text search and semantic search are explicitly out of scope for Phase 3.
+- **No message reactions/replies/quotes rendering:** These WhatsApp features are not parsed or rendered yet.
+- **No true cursor-based pagination:** All message metadata is loaded from Dexie at once. Virtualization handles rendering efficiency, but memory usage scales linearly with chat size.
+- **Linkification is regex-based:** Simple `https?://` pattern matching. Does not handle phone numbers, emails, or other rich link types.
