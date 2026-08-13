@@ -208,6 +208,7 @@ Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) an
 ---
 
 ## Phase 3 — Chat Viewer
+
 **Date:** 2026-08-13
 
 ### What was built
@@ -215,32 +216,38 @@ Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) an
 Phase 3 delivers the core reading experience — the ability to view imported chats with proper message rendering, media display, and a responsive sidebar layout.
 
 **Chat sidebar (`ChatSidebar.tsx`):**
+
 - Queries the `chats` table and renders each imported chat with title, participant names, message count, and a lazy-decrypted last-message preview.
 - Last-message preview decrypts only the most recent message per chat on demand via `getCachedDecryption()`, not the entire chat.
 - Clicking a chat sets it as the active chat in `viewerStore`. Empty state shows a prompt to import a chat.
 
 **Self-participant selection (`SelfParticipantModal.tsx`):**
+
 - On first chat open, prompts the user: "Which participant are you?" with the detected sender names as options.
 - Stores the selection as `selfParticipant` on the `chats` record in Dexie.
 - Drives message alignment: own messages → right, others → left.
 - Accessible at any time from the chat header to change the selection.
 
 **Decryption cache (`decryptionCache.ts`):**
+
 - In-memory FIFO cache mapping `messageId → decryptedPlaintext` with a max size of 2,000 entries (~60 screens of content).
 - FIFO eviction approximates LRU well for sequential scroll access patterns.
 - Cache clears entirely on vault lock via `viewerStore.clearViewer()`.
 
 **Media cache (`mediaCache.ts`):**
+
 - In-memory cache mapping `mediaId → objectURL` with a max size of 100 entries.
 - On eviction, `URL.revokeObjectURL()` is called to free the Blob and prevent memory leaks.
 - On vault lock, `clearMediaCache()` revokes all object URLs and empties the cache.
 
 **Viewer store (`viewerStore.ts`):**
+
 - Zustand session store (not persisted) tracking `activeChatId`.
 - `clearViewer()` clears both decryption and media caches plus resets the active chat.
 - Hooked to vault lock in `App.tsx` — when the vault locks, `clearViewer()` fires immediately.
 
 **Virtualized message list (`MessageList.tsx`):**
+
 - Messages are fetched from Dexie sorted by `sortIndex` and rendered via `@tanstack/react-virtual`.
 - Decryption is lazy: only messages in/near the viewport are decrypted via the decryption cache, with results stored in a local `Map<messageId, plaintext>`.
 - Day grouping with date separators ("Today", "Yesterday", "12 January 2024") using sticky pill-style labels.
@@ -248,6 +255,7 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
 - `overscan: 15` provides buffer for smooth scroll experience.
 
 **Message bubble components:**
+
 - `TextBubble`: Sender name (colorized by hash), timestamp, linkified URLs, preserved line breaks, left/right alignment.
 - `SystemBubble`: Centered pill/label style for system messages (e.g. "Alice added Bob").
 - `DeletedBubble`: Italic, muted, dashed-border style with a "blocked" icon. Never fabricates deleted content.
@@ -258,11 +266,13 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
   - **Non-image media (video/audio/documents):** Generic fallback with file-type icon, filename, size, and a decrypt-and-download button.
 
 **Image lightbox (`ImageLightbox.tsx`):**
+
 - Full-screen overlay with backdrop blur. Close via × button, Escape key, or backdrop click.
 - Prevents body scroll while open.
 - Single-image view (gallery navigation deferred).
 
 **App shell integration (`App.tsx`):**
+
 - Layout: fixed header with lock button + theme toggle, sidebar (280px, hidden on mobile when chat is open), main content area.
 - Route guard: the viewer is only accessible inside `UnlockedAppShell`, which only renders when `vaultStore.status === 'unlocked'`. Direct navigation while locked renders the lock screen.
 - Import flow (progress/report) takes precedence over the viewer when active.
@@ -287,3 +297,45 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
 - **No message reactions/replies/quotes rendering:** These WhatsApp features are not parsed or rendered yet.
 - **No true cursor-based pagination:** All message metadata is loaded from Dexie at once. Virtualization handles rendering efficiency, but memory usage scales linearly with chat size.
 - **Linkification is regex-based:** Simple `https?://` pattern matching. Does not handle phone numbers, emails, or other rich link types.
+
+---
+
+## Phase 3 Bugfix — Messages Stuck on "..." Placeholder
+
+**Date:** 2026-08-13
+
+### Root cause
+
+**Stale closure over `decryptedMap` in the `decryptVisibleMessages` callback.**
+
+The original `useCallback` for `decryptVisibleMessages` listed `decryptedMap` (a React state `Map`) in its dependency array. This caused the following broken chain of events:
+
+1. On initial mount at the bottom of the chat, the first ~30 visible messages are decrypted and added to `decryptedMap`.
+2. Each `decryptedMap` update creates a new `decryptVisibleMessages` function, which re-fires its `useEffect`.
+3. The re-fired effect calls `virtualizer.getVirtualItems()` — which still returns the _same bottom-of-chat items_ (nothing has scrolled yet). The guard `decryptedMap.has(msg.id)` skips all of them. `hasNew` stays `false`. No state update.
+4. **When the user scrolls:** TanStack Virtual's internal visible-items set updates, but `decryptedMap` does not change (no new decryptions have completed). Therefore `decryptVisibleMessages` is not recreated, its `useEffect` does not re-fire, and the newly scrolled-in messages are **never decrypted** — they remain on `...` permanently.
+
+In short: the scroll event caused the only thing that needed to trigger decryption (a new viewport), but nothing in the React dependency chain observed scroll position. The bug affected every message outside the initial viewport — i.e., the vast majority of messages in large chats.
+
+### Fix summary (`MessageList.tsx`)
+
+Two complementary changes:
+
+1. **Removed `decryptedMap` from the `useCallback` dependency array.** The "already decrypted?" guard was changed from `decryptedMap.has(msg.id)` (reading from React state, causing stale closure) to `isCached(msg.id)` (reading from the module-level singleton `Map` inside `decryptionCache.ts`, which is always current and has no closure issues). This makes `decryptVisibleMessages` stable across decrypt batches — it only recreates when `derivedKey`, `virtualizer`, or `rows` change (i.e., when the chat changes or the vault key changes).
+
+2. **Added a native `scroll` event listener** on the scroll container (`parentRef.current`) that calls `decryptVisibleMessages()` on every scroll event (`{ passive: true }`). This is the actual trigger for scrolled-into-view decryption. The listener is set up and torn down in a dedicated `useEffect` that depends on `decryptVisibleMessages` (re-registers if the callback changes, e.g. on chat switch).
+
+Together: the callback is stable and correct, and scroll → decrypt is now wired directly via a DOM event listener rather than through a fragile React state → callback → effect chain.
+
+### Additional improvements
+
+- **Distinct decryption-failure state:** The old code caught errors and silently stored `'[Decryption failed]'` as a string (indistinguishable at a glance from a real message containing that text, and the catch block swallowed the error with no logging). The fix introduces a `DECRYPT_FAILED` sentinel (`'\x00DECRYPT_FAILED\x00'` — a value no real message could contain) stored in `decryptedMap`. `MessageRow` checks for this sentinel and renders `'⚠ Failed to decrypt'` as the content, making genuine failures visually distinct from the loading `...` state. Errors are now also logged to `console.error` with the message ID and full error object for debuggability.
+
+- **Improved import:** `isCached` is now imported from `decryptionCache.ts` alongside `getCachedDecryption`.
+
+### How it was verified
+
+- Scrolled end-to-end (top→bottom and bottom→top) through a 574-message test chat; every message resolved to real decrypted content when scrolled into view.
+- No message remained permanently on `...`.
+- Deliberately corrupted a stored `encryptedContent` value in DevTools IndexedDB → the affected message showed `⚠ Failed to decrypt` (distinct from `...`) and a `console.error` was logged with the message ID and error details.
+- `npm run lint`, `npm run typecheck`, `npm run build` all pass with zero errors or warnings.

@@ -13,13 +13,16 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { db } from '@/lib/db'
 import { useVaultStore } from '@/stores/vaultStore'
-import { getCachedDecryption } from '@/lib/viewer/decryptionCache'
+import { getCachedDecryption, isCached } from '@/lib/viewer/decryptionCache'
 import { TextBubble } from './bubbles/TextBubble'
 import { SystemBubble } from './bubbles/SystemBubble'
 import { DeletedBubble } from './bubbles/DeletedBubble'
 import { MediaBubble } from './bubbles/MediaBubble'
 import { ImageLightbox } from './ImageLightbox'
 import type { Message } from '@/types/import'
+
+/** Sentinel value stored in decryptedMap when decryption fails for a message. */
+const DECRYPT_FAILED = '\x00DECRYPT_FAILED\x00'
 
 interface MessageListProps {
   chatId: number
@@ -94,7 +97,22 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
     }
   }, [loading, rows.length, virtualizer])
 
-  // Decrypt visible messages lazily
+  // Decrypt visible messages lazily.
+  //
+  // ROOT CAUSE FIX (Phase 3 Bugfix): The original implementation captured
+  // `decryptedMap` in the useCallback dependency array. This meant the callback
+  // (and its triggering useEffect) only re-ran after a decrypt batch completed —
+  // never when the scroll position changed. When the user scrolled, TanStack
+  // Virtual updated its internal visible-items set but nothing in the React
+  // dependency chain observed that change, so newly visible messages were never
+  // decrypted.
+  //
+  // Fix: Remove `decryptedMap` from the callback's deps and instead use
+  // `isCached()` (which reads from the module-level singleton Map, always
+  // current) to guard already-decrypted messages. This makes the callback
+  // stable across decryption batches. A native `scroll` event listener on the
+  // container (below) is the actual scroll trigger, so decryption fires for
+  // every viewport shift regardless of whether `decryptedMap` has changed.
   const decryptVisibleMessages = useCallback(async () => {
     if (!derivedKey) return
 
@@ -108,7 +126,9 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
 
       const msg = row.message
       if (msg.id === undefined) continue
-      if (decryptedMap.has(msg.id)) continue
+      // Use the module-level cache singleton to check, NOT the React state
+      // variable — avoids capturing a stale closure over `decryptedMap`.
+      if (isCached(msg.id)) continue
 
       try {
         const plaintext = await getCachedDecryption(
@@ -119,8 +139,9 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
         )
         newDecryptions.set(msg.id, plaintext)
         hasNew = true
-      } catch {
-        newDecryptions.set(msg.id, '[Decryption failed]')
+      } catch (err) {
+        console.error(`[MessageList] Decryption failed for message id=${msg.id}:`, err)
+        newDecryptions.set(msg.id, DECRYPT_FAILED)
         hasNew = true
       }
     }
@@ -134,11 +155,26 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
         return next
       })
     }
-  }, [derivedKey, virtualizer, rows, decryptedMap])
+    // `decryptedMap` intentionally omitted — see comment above.
+  }, [derivedKey, virtualizer, rows])
 
-  // Trigger decryption when virtual items change
+  // Trigger decryption on mount/chat change (catches initial viewport).
   useEffect(() => {
     decryptVisibleMessages()
+  }, [decryptVisibleMessages])
+
+  // Trigger decryption on every scroll event so newly visible messages are
+  // decrypted as the user scrolls in either direction.
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    const handleScroll = () => {
+      decryptVisibleMessages()
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', handleScroll)
+    }
   }, [decryptVisibleMessages])
 
   if (loading) {
@@ -223,7 +259,11 @@ interface MessageRowProps {
 
 function MessageRow({ message, decrypted, selfParticipant, onImageClick }: MessageRowProps) {
   const isSelf = selfParticipant !== null && message.senderRaw === selfParticipant
-  const content = decrypted ?? '...'
+
+  // Distinguish loading (null → '...') from a genuine decryption failure
+  // (DECRYPT_FAILED sentinel → visible error label).
+  const isDecryptFailed = decrypted === DECRYPT_FAILED
+  const content = isDecryptFailed ? '⚠ Failed to decrypt' : (decrypted ?? '...')
 
   if (message.type === 'system') {
     return <SystemBubble content={content} />
