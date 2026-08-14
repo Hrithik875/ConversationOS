@@ -51,7 +51,13 @@ async function loadModel(): Promise<FeatureExtractionPipeline> {
     // Use quantized model to reduce download size (~23MB vs ~90MB).
     // Quantization has negligible quality loss for semantic search at this scale.
     dtype: 'q8',
-    progress_callback: (data: any) => {
+    progress_callback: (data: {
+      status: string
+      file: string
+      progress?: number
+      loaded?: number
+      total?: number
+    }) => {
       if (data.status === 'progress' || data.status === 'downloading') {
         self.postMessage({
           type: 'modelProgress',
@@ -101,7 +107,7 @@ async function embedText(
   try {
     // The pipeline returns a Tensor with shape [1, seqLen, dim].
     const output = await extractor(text, { pooling: 'mean', normalize: true })
-    
+
     // Safely copy the data into a new Float32Array to avoid transferring the ONNX runtime's internal buffer
     const data = output.data
     const vec = new Float32Array(data.length)
