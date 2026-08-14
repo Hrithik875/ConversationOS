@@ -18,6 +18,7 @@
  *
  * Protocol (worker → main):
  *   { type: 'modelLoading' }
+ *   { type: 'modelProgress', file: string, progress: number, loaded: number, total: number }
  *   { type: 'modelReady' }
  *   { type: 'progress', done: number, total: number }
  *   { type: 'result', messageId: number, vector: Float32Array }
@@ -26,8 +27,11 @@
  *   { type: 'error', message: string }
  */
 
-import { pipeline, type FeatureExtractionPipeline } from '@huggingface/transformers'
+import { pipeline, env, type FeatureExtractionPipeline } from '@huggingface/transformers'
 import type { EmbeddableMessage, EmbeddingWorkerRequest } from '../types/search'
+
+// Skip local model checks since we're in a browser worker environment
+env.allowLocalModels = false
 
 /** Model identifier — pinned so modelVersion in DB is stable. */
 export const MODEL_ID = 'Xenova/all-MiniLM-L6-v2'
@@ -36,27 +40,76 @@ export const MODEL_ID = 'Xenova/all-MiniLM-L6-v2'
 const EMBED_BATCH_SIZE = 16
 
 let pipe: FeatureExtractionPipeline | null = null
+let loadModelPromise: Promise<FeatureExtractionPipeline> | null = null
 
 async function loadModel(): Promise<FeatureExtractionPipeline> {
   if (pipe) return pipe
+  if (loadModelPromise) return loadModelPromise
+
   self.postMessage({ type: 'modelLoading' })
-  pipe = await pipeline('feature-extraction', MODEL_ID, {
+  loadModelPromise = pipeline('feature-extraction', MODEL_ID, {
     // Use quantized model to reduce download size (~23MB vs ~90MB).
     // Quantization has negligible quality loss for semantic search at this scale.
     dtype: 'q8',
+    progress_callback: (data: any) => {
+      if (data.status === 'progress' || data.status === 'downloading') {
+        self.postMessage({
+          type: 'modelProgress',
+          file: data.file,
+          progress: data.progress ?? 0,
+          loaded: data.loaded ?? 0,
+          total: data.total ?? 0,
+        })
+      }
+    },
+  }).then((p) => {
+    pipe = p
+    self.postMessage({ type: 'modelReady' })
+    return p
   })
-  self.postMessage({ type: 'modelReady' })
-  return pipe
+
+  return loadModelPromise
+}
+
+let isProcessing = false
+const processingQueue: (() => void)[] = []
+
+async function acquireLock(): Promise<void> {
+  if (!isProcessing) {
+    isProcessing = true
+    return
+  }
+  return new Promise((resolve) => {
+    processingQueue.push(resolve)
+  })
+}
+
+function releaseLock(): void {
+  if (processingQueue.length > 0) {
+    const next = processingQueue.shift()
+    next?.()
+  } else {
+    isProcessing = false
+  }
 }
 
 async function embedText(
   extractor: FeatureExtractionPipeline,
   text: string,
 ): Promise<Float32Array> {
-  // The pipeline returns a Tensor with shape [1, seqLen, dim].
-  const output = await extractor(text, { pooling: 'mean', normalize: true })
-  // output.data is a Float32Array of length dim (already pooled + normalized by HF transformers).
-  return new Float32Array(output.data as Float32Array)
+  await acquireLock()
+  try {
+    // The pipeline returns a Tensor with shape [1, seqLen, dim].
+    const output = await extractor(text, { pooling: 'mean', normalize: true })
+    
+    // Safely copy the data into a new Float32Array to avoid transferring the ONNX runtime's internal buffer
+    const data = output.data
+    const vec = new Float32Array(data.length)
+    vec.set(data as ArrayLike<number>)
+    return vec
+  } finally {
+    releaseLock()
+  }
 }
 
 async function processBatch(messages: EmbeddableMessage[]): Promise<void> {
@@ -107,7 +160,7 @@ self.onmessage = async (e: MessageEvent<EmbeddingWorkerRequest>) => {
         { transfer: [vector.buffer] },
       )
     } catch (err) {
-      self.postMessage({ type: 'error', message: String(err) })
+      self.postMessage({ type: 'queryError', requestId: msg.requestId, message: String(err) })
     }
     return
   }

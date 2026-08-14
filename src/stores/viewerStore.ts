@@ -53,3 +53,12 @@ export const useViewerStore = create<ViewerState>()((set) => ({
     set({ activeChatId: null })
   },
 }))
+
+if (import.meta.hot) {
+  import.meta.hot.dispose((data) => {
+    data.state = useViewerStore.getState()
+  })
+  if (import.meta.hot.data?.state) {
+    useViewerStore.setState(import.meta.hot.data.state)
+  }
+}

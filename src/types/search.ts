@@ -83,11 +83,19 @@ export type EmbeddingWorkerRequest =
 /** Messages sent from embedding worker → main thread. */
 export type EmbeddingWorkerResponse =
   | { type: 'modelLoading' }
+  | {
+      type: 'modelProgress'
+      file: string
+      progress: number
+      loaded: number
+      total: number
+    }
   | { type: 'modelReady' }
   | { type: 'progress'; done: number; total: number }
   | { type: 'result'; messageId: number; vector: Float32Array }
   | { type: 'done' }
   | { type: 'queryResult'; requestId: string; vector: Float32Array }
+  | { type: 'queryError'; requestId: string; message: string }
   | { type: 'error'; message: string }
 
 // ---------------------------------------------------------------------------

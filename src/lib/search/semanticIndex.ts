@@ -112,6 +112,20 @@ function getEmbeddingWorker(derivedKey: CryptoKey): Worker {
       return
     }
 
+    if (msg.type === 'modelProgress') {
+      useSearchStore.getState().setModelProgress(msg.progress)
+      return
+    }
+
+    if (msg.type === 'queryError') {
+      const pending = QUERY_RESOLVERS.get(msg.requestId)
+      if (pending) {
+        QUERY_RESOLVERS.delete(msg.requestId)
+        pending.reject(new Error(msg.message))
+      }
+      return
+    }
+
     if (msg.type === 'error') {
       console.error('[semanticIndex] Worker error:', msg.message)
       useSearchStore.getState().setEmbeddingProgress('error')

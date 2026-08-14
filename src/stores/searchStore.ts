@@ -26,6 +26,9 @@ interface SearchState {
   /** Total messages needing embedding. */
   embeddingTotal: number
 
+  /** Model download progress (0-100). */
+  modelProgress: number
+
   /** Open the search panel. */
   openSearch: () => void
 
@@ -38,6 +41,9 @@ interface SearchState {
   /** Update embedding status and progress. */
   setEmbeddingProgress: (status: EmbeddingStatus, done?: number, total?: number) => void
 
+  /** Update model download progress. */
+  setModelProgress: (progress: number) => void
+
   /** Reset all search state on vault lock. */
   clearSearch: () => void
 }
@@ -48,6 +54,7 @@ export const useSearchStore = create<SearchState>()((set) => ({
   embeddingStatus: 'idle',
   embeddingDone: 0,
   embeddingTotal: 0,
+  modelProgress: 0,
 
   openSearch: () => set({ isSearchOpen: true }),
   closeSearch: () => set({ isSearchOpen: false }),
@@ -61,6 +68,8 @@ export const useSearchStore = create<SearchState>()((set) => ({
       ...(total !== undefined ? { embeddingTotal: total } : {}),
     }),
 
+  setModelProgress: (progress) => set({ modelProgress: progress }),
+
   clearSearch: () =>
     set({
       isSearchOpen: false,
@@ -68,5 +77,15 @@ export const useSearchStore = create<SearchState>()((set) => ({
       embeddingStatus: 'idle',
       embeddingDone: 0,
       embeddingTotal: 0,
+      modelProgress: 0,
     }),
 }))
+
+if (import.meta.hot) {
+  import.meta.hot.dispose((data) => {
+    data.state = useSearchStore.getState()
+  })
+  if (import.meta.hot.data?.state) {
+    useSearchStore.setState(import.meta.hot.data.state)
+  }
+}

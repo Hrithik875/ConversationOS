@@ -210,3 +210,20 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
   clearError: () => set({ lastError: null }),
 }))
+
+// ---------------------------------------------------------------------------
+// Development HMR (Hot Module Replacement) Support
+// ---------------------------------------------------------------------------
+// Persists the in-memory state (including the CryptoKey) across Vite HMR reloads.
+// This prevents the frustrating experience of being logged out every time a file
+// is saved during development. This data is purely in-memory and does not survive
+// a hard page refresh, preserving the security model.
+if (import.meta.hot) {
+  import.meta.hot.dispose((data) => {
+    data.state = useVaultStore.getState()
+  })
+  if (import.meta.hot.data?.state) {
+    useVaultStore.setState(import.meta.hot.data.state)
+  }
+}
+

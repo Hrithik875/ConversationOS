@@ -29,6 +29,7 @@ export function SearchPanel({ onNavigate }: SearchPanelProps) {
   const embeddingStatus = useSearchStore((s) => s.embeddingStatus)
   const embeddingDone = useSearchStore((s) => s.embeddingDone)
   const embeddingTotal = useSearchStore((s) => s.embeddingTotal)
+  const modelProgress = useSearchStore((s) => s.modelProgress)
   const derivedKey = useVaultStore((s) => s.derivedKey)
 
   const [query, setQuery] = useState('')
@@ -206,7 +207,7 @@ export function SearchPanel({ onNavigate }: SearchPanelProps) {
           {(mode === 'semantic' || mode === 'both') && embeddingStatus !== 'ready' && (
             <span className="ml-auto text-[10px] text-muted-foreground">
               {embeddingStatus === 'loading-model'
-                ? 'Loading AI model…'
+                ? `Loading AI model… ${Math.round(modelProgress)}%`
                 : embeddingStatus === 'indexing'
                   ? `Semantic indexing: ${embeddingPct}% (${embeddingDone.toLocaleString()}/${embeddingTotal.toLocaleString()})`
                   : embeddingStatus === 'idle'
