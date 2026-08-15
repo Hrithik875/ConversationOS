@@ -13,7 +13,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { db } from '@/lib/db'
 import { useVaultStore } from '@/stores/vaultStore'
-import { getCachedDecryption } from '@/lib/viewer/decryptionCache'
+import { getCachedDecryption, isCached } from '@/lib/viewer/decryptionCache'
 import { TextBubble } from './bubbles/TextBubble'
 import { SystemBubble } from './bubbles/SystemBubble'
 import { DeletedBubble } from './bubbles/DeletedBubble'
@@ -21,22 +21,35 @@ import { MediaBubble } from './bubbles/MediaBubble'
 import { ImageLightbox } from './ImageLightbox'
 import type { Message } from '@/types/import'
 
+/** Sentinel value stored in decryptedMap when decryption fails for a message. */
+const DECRYPT_FAILED = '\x00DECRYPT_FAILED\x00'
+
 interface MessageListProps {
   chatId: number
   selfParticipant: string | null
+  /** When set, the virtualizer scrolls to this message ID and briefly highlights it. */
+  scrollToMessageId?: number | null
+  /** Called after scroll-to has been performed (so parent can clear the prop). */
+  onScrollToComplete?: () => void
 }
 
 /** A row in the virtual list — either a date separator or a message. */
 type ListRow =
   { kind: 'date'; label: string } | { kind: 'message'; message: Message; decrypted: string | null }
 
-export function MessageList({ chatId, selfParticipant }: MessageListProps) {
+export function MessageList({
+  chatId,
+  selfParticipant,
+  scrollToMessageId,
+  onScrollToComplete,
+}: MessageListProps) {
   const [allMessages, setAllMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(true)
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const derivedKey = useVaultStore((s) => s.derivedKey)
   const parentRef = useRef<HTMLDivElement>(null)
   const [decryptedMap, setDecryptedMap] = useState<Map<number, string>>(new Map())
+  const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null)
 
   // Load all messages for this chat (sorted by sortIndex)
   useEffect(() => {
@@ -94,7 +107,40 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
     }
   }, [loading, rows.length, virtualizer])
 
-  // Decrypt visible messages lazily
+  // Scroll to a specific message when requested (from search navigation).
+  useEffect(() => {
+    if (!scrollToMessageId || loading || rows.length === 0) return
+    const rowIndex = rows.findIndex(
+      (r) => r.kind === 'message' && r.message.id === scrollToMessageId,
+    )
+    if (rowIndex === -1) return
+    requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(rowIndex, { align: 'center' })
+      setHighlightedMessageId(scrollToMessageId)
+      // Remove highlight after 2 seconds.
+      setTimeout(() => setHighlightedMessageId(null), 2000)
+      onScrollToComplete?.()
+    })
+    // onScrollToComplete intentionally excluded — it's a stable callback ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToMessageId, loading, rows, virtualizer])
+
+  // Decrypt visible messages lazily.
+  //
+  // ROOT CAUSE FIX (Phase 3 Bugfix): The original implementation captured
+  // `decryptedMap` in the useCallback dependency array. This meant the callback
+  // (and its triggering useEffect) only re-ran after a decrypt batch completed —
+  // never when the scroll position changed. When the user scrolled, TanStack
+  // Virtual updated its internal visible-items set but nothing in the React
+  // dependency chain observed that change, so newly visible messages were never
+  // decrypted.
+  //
+  // Fix: Remove `decryptedMap` from the callback's deps and instead use
+  // `isCached()` (which reads from the module-level singleton Map, always
+  // current) to guard already-decrypted messages. This makes the callback
+  // stable across decryption batches. A native `scroll` event listener on the
+  // container (below) is the actual scroll trigger, so decryption fires for
+  // every viewport shift regardless of whether `decryptedMap` has changed.
   const decryptVisibleMessages = useCallback(async () => {
     if (!derivedKey) return
 
@@ -108,7 +154,9 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
 
       const msg = row.message
       if (msg.id === undefined) continue
-      if (decryptedMap.has(msg.id)) continue
+      // Use the module-level cache singleton to check, NOT the React state
+      // variable — avoids capturing a stale closure over `decryptedMap`.
+      if (isCached(msg.id)) continue
 
       try {
         const plaintext = await getCachedDecryption(
@@ -119,8 +167,9 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
         )
         newDecryptions.set(msg.id, plaintext)
         hasNew = true
-      } catch {
-        newDecryptions.set(msg.id, '[Decryption failed]')
+      } catch (err) {
+        console.error(`[MessageList] Decryption failed for message id=${msg.id}:`, err)
+        newDecryptions.set(msg.id, DECRYPT_FAILED)
         hasNew = true
       }
     }
@@ -134,11 +183,26 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
         return next
       })
     }
-  }, [derivedKey, virtualizer, rows, decryptedMap])
+    // `decryptedMap` intentionally omitted — see comment above.
+  }, [derivedKey, virtualizer, rows])
 
-  // Trigger decryption when virtual items change
+  // Trigger decryption on mount/chat change (catches initial viewport).
   useEffect(() => {
     decryptVisibleMessages()
+  }, [decryptVisibleMessages])
+
+  // Trigger decryption on every scroll event so newly visible messages are
+  // decrypted as the user scrolls in either direction.
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    const handleScroll = () => {
+      decryptVisibleMessages()
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', handleScroll)
+    }
   }, [decryptVisibleMessages])
 
   if (loading) {
@@ -191,6 +255,7 @@ export function MessageList({ chatId, selfParticipant }: MessageListProps) {
                     decrypted={row.decrypted}
                     selfParticipant={selfParticipant}
                     onImageClick={setLightboxUrl}
+                    isHighlighted={row.message.id === highlightedMessageId}
                   />
                 )}
               </div>
@@ -219,19 +284,40 @@ interface MessageRowProps {
   decrypted: string | null
   selfParticipant: string | null
   onImageClick: (url: string) => void
+  /** Briefly highlight this row when navigated to from a search result. */
+  isHighlighted?: boolean
 }
 
-function MessageRow({ message, decrypted, selfParticipant, onImageClick }: MessageRowProps) {
+function MessageRow({
+  message,
+  decrypted,
+  selfParticipant,
+  onImageClick,
+  isHighlighted,
+}: MessageRowProps) {
   const isSelf = selfParticipant !== null && message.senderRaw === selfParticipant
-  const content = decrypted ?? '...'
+
+  // Distinguish loading (null → '...') from a genuine decryption failure
+  // (DECRYPT_FAILED sentinel → visible error label).
+  const isDecryptFailed = decrypted === DECRYPT_FAILED
+  const content = isDecryptFailed ? '⚠ Failed to decrypt' : (decrypted ?? '...')
+
+  // Highlight ring when navigated to from a search result.
+  const highlightClass = isHighlighted
+    ? 'rounded-lg ring-2 ring-amber-400/70 ring-offset-1 transition-all duration-300'
+    : ''
 
   if (message.type === 'system') {
-    return <SystemBubble content={content} />
+    return (
+      <div className={highlightClass}>
+        <SystemBubble content={content} />
+      </div>
+    )
   }
 
   if (message.type === 'deleted') {
     return (
-      <div className="py-0.5">
+      <div className={`py-0.5 ${highlightClass}`}>
         <DeletedBubble content={content} timestamp={message.timestamp} isSelf={isSelf} />
       </div>
     )
@@ -239,7 +325,7 @@ function MessageRow({ message, decrypted, selfParticipant, onImageClick }: Messa
 
   if (message.type === 'media') {
     return (
-      <div className="py-0.5">
+      <div className={`py-0.5 ${highlightClass}`}>
         <MediaBubble
           content={content}
           senderRaw={message.senderRaw}
@@ -254,7 +340,7 @@ function MessageRow({ message, decrypted, selfParticipant, onImageClick }: Messa
 
   // text
   return (
-    <div className="py-0.5">
+    <div className={`py-0.5 ${highlightClass}`}>
       <TextBubble
         content={content}
         senderRaw={message.senderRaw}

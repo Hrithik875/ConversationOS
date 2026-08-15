@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import type { VaultMeta, SettingsRow } from '@/types/vault'
 import type { Chat, Message, MediaEntry, ImportRecord } from '@/types/import'
+import type { EmbeddingEntry } from '@/types/search'
 
 /**
  * ConversationOS IndexedDB database.
@@ -12,6 +13,7 @@ import type { Chat, Message, MediaEntry, ImportRecord } from '@/types/import'
  * - Version 3: Settings table added (Phase 1 — auto-lock timeout config).
  * - Version 4: Dev-only test harness scratch table (Phase 1 — temporary, remove before v1.0).
  * - Version 5: Import engine tables (Phase 2 — chats, messages, media, imports).
+ * - Version 6: Embeddings table (Phase 4 — encrypted semantic search vectors).
  */
 export class ConversationOSDatabase extends Dexie {
   /**
@@ -65,6 +67,15 @@ export class ConversationOSDatabase extends Dexie {
    */
   imports!: Table<ImportRecord, number>
 
+  /**
+   * Encrypted embedding vectors for semantic search.
+   *
+   * SECURITY NOTE: Vectors are derived from message content and could leak
+   * semantic information. They are encrypted at rest with the vault key.
+   * The plaintext Float32Array lives in memory only during an unlocked session.
+   */
+  embeddings!: Table<EmbeddingEntry, number>
+
   constructor() {
     super('ConversationOSDatabase')
 
@@ -105,6 +116,20 @@ export class ConversationOSDatabase extends Dexie {
       messages: '++id, chatId, timestamp, type, sortIndex',
       media: '++id, sha256Hash, originalFilename',
       imports: '++id, timestamp',
+    })
+
+    // Version 6: Embeddings table (Phase 4).
+    // - embeddings: indexed by messageId for O(1) lookup, modelVersion for
+    //   detecting stale vectors when the model is upgraded.
+    this.version(6).stores({
+      vaultMeta: '++id',
+      settings: 'key',
+      _devTestCiphertext: '++id',
+      chats: '++id, importId',
+      messages: '++id, chatId, timestamp, type, sortIndex',
+      media: '++id, sha256Hash, originalFilename',
+      imports: '++id, timestamp',
+      embeddings: '++id, messageId, modelVersion',
     })
   }
 }

@@ -208,6 +208,7 @@ Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) an
 ---
 
 ## Phase 3 — Chat Viewer
+
 **Date:** 2026-08-13
 
 ### What was built
@@ -215,32 +216,38 @@ Phase 2 introduces the ability to import a real WhatsApp chat export (`.zip`) an
 Phase 3 delivers the core reading experience — the ability to view imported chats with proper message rendering, media display, and a responsive sidebar layout.
 
 **Chat sidebar (`ChatSidebar.tsx`):**
+
 - Queries the `chats` table and renders each imported chat with title, participant names, message count, and a lazy-decrypted last-message preview.
 - Last-message preview decrypts only the most recent message per chat on demand via `getCachedDecryption()`, not the entire chat.
 - Clicking a chat sets it as the active chat in `viewerStore`. Empty state shows a prompt to import a chat.
 
 **Self-participant selection (`SelfParticipantModal.tsx`):**
+
 - On first chat open, prompts the user: "Which participant are you?" with the detected sender names as options.
 - Stores the selection as `selfParticipant` on the `chats` record in Dexie.
 - Drives message alignment: own messages → right, others → left.
 - Accessible at any time from the chat header to change the selection.
 
 **Decryption cache (`decryptionCache.ts`):**
+
 - In-memory FIFO cache mapping `messageId → decryptedPlaintext` with a max size of 2,000 entries (~60 screens of content).
 - FIFO eviction approximates LRU well for sequential scroll access patterns.
 - Cache clears entirely on vault lock via `viewerStore.clearViewer()`.
 
 **Media cache (`mediaCache.ts`):**
+
 - In-memory cache mapping `mediaId → objectURL` with a max size of 100 entries.
 - On eviction, `URL.revokeObjectURL()` is called to free the Blob and prevent memory leaks.
 - On vault lock, `clearMediaCache()` revokes all object URLs and empties the cache.
 
 **Viewer store (`viewerStore.ts`):**
+
 - Zustand session store (not persisted) tracking `activeChatId`.
 - `clearViewer()` clears both decryption and media caches plus resets the active chat.
 - Hooked to vault lock in `App.tsx` — when the vault locks, `clearViewer()` fires immediately.
 
 **Virtualized message list (`MessageList.tsx`):**
+
 - Messages are fetched from Dexie sorted by `sortIndex` and rendered via `@tanstack/react-virtual`.
 - Decryption is lazy: only messages in/near the viewport are decrypted via the decryption cache, with results stored in a local `Map<messageId, plaintext>`.
 - Day grouping with date separators ("Today", "Yesterday", "12 January 2024") using sticky pill-style labels.
@@ -248,6 +255,7 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
 - `overscan: 15` provides buffer for smooth scroll experience.
 
 **Message bubble components:**
+
 - `TextBubble`: Sender name (colorized by hash), timestamp, linkified URLs, preserved line breaks, left/right alignment.
 - `SystemBubble`: Centered pill/label style for system messages (e.g. "Alice added Bob").
 - `DeletedBubble`: Italic, muted, dashed-border style with a "blocked" icon. Never fabricates deleted content.
@@ -258,11 +266,13 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
   - **Non-image media (video/audio/documents):** Generic fallback with file-type icon, filename, size, and a decrypt-and-download button.
 
 **Image lightbox (`ImageLightbox.tsx`):**
+
 - Full-screen overlay with backdrop blur. Close via × button, Escape key, or backdrop click.
 - Prevents body scroll while open.
 - Single-image view (gallery navigation deferred).
 
 **App shell integration (`App.tsx`):**
+
 - Layout: fixed header with lock button + theme toggle, sidebar (280px, hidden on mobile when chat is open), main content area.
 - Route guard: the viewer is only accessible inside `UnlockedAppShell`, which only renders when `vaultStore.status === 'unlocked'`. Direct navigation while locked renders the lock screen.
 - Import flow (progress/report) takes precedence over the viewer when active.
@@ -287,3 +297,127 @@ Phase 3 delivers the core reading experience — the ability to view imported ch
 - **No message reactions/replies/quotes rendering:** These WhatsApp features are not parsed or rendered yet.
 - **No true cursor-based pagination:** All message metadata is loaded from Dexie at once. Virtualization handles rendering efficiency, but memory usage scales linearly with chat size.
 - **Linkification is regex-based:** Simple `https?://` pattern matching. Does not handle phone numbers, emails, or other rich link types.
+
+---
+
+## Phase 3 Bugfix — Messages Stuck on "..." Placeholder
+
+**Date:** 2026-08-13
+
+### Root cause
+
+**Stale closure over `decryptedMap` in the `decryptVisibleMessages` callback.**
+
+The original `useCallback` for `decryptVisibleMessages` listed `decryptedMap` (a React state `Map`) in its dependency array. This caused the following broken chain of events:
+
+1. On initial mount at the bottom of the chat, the first ~30 visible messages are decrypted and added to `decryptedMap`.
+2. Each `decryptedMap` update creates a new `decryptVisibleMessages` function, which re-fires its `useEffect`.
+3. The re-fired effect calls `virtualizer.getVirtualItems()` — which still returns the _same bottom-of-chat items_ (nothing has scrolled yet). The guard `decryptedMap.has(msg.id)` skips all of them. `hasNew` stays `false`. No state update.
+4. **When the user scrolls:** TanStack Virtual's internal visible-items set updates, but `decryptedMap` does not change (no new decryptions have completed). Therefore `decryptVisibleMessages` is not recreated, its `useEffect` does not re-fire, and the newly scrolled-in messages are **never decrypted** — they remain on `...` permanently.
+
+In short: the scroll event caused the only thing that needed to trigger decryption (a new viewport), but nothing in the React dependency chain observed scroll position. The bug affected every message outside the initial viewport — i.e., the vast majority of messages in large chats.
+
+### Fix summary (`MessageList.tsx`)
+
+Two complementary changes:
+
+1. **Removed `decryptedMap` from the `useCallback` dependency array.** The "already decrypted?" guard was changed from `decryptedMap.has(msg.id)` (reading from React state, causing stale closure) to `isCached(msg.id)` (reading from the module-level singleton `Map` inside `decryptionCache.ts`, which is always current and has no closure issues). This makes `decryptVisibleMessages` stable across decrypt batches — it only recreates when `derivedKey`, `virtualizer`, or `rows` change (i.e., when the chat changes or the vault key changes).
+
+2. **Added a native `scroll` event listener** on the scroll container (`parentRef.current`) that calls `decryptVisibleMessages()` on every scroll event (`{ passive: true }`). This is the actual trigger for scrolled-into-view decryption. The listener is set up and torn down in a dedicated `useEffect` that depends on `decryptVisibleMessages` (re-registers if the callback changes, e.g. on chat switch).
+
+Together: the callback is stable and correct, and scroll → decrypt is now wired directly via a DOM event listener rather than through a fragile React state → callback → effect chain.
+
+### Additional improvements
+
+- **Distinct decryption-failure state:** The old code caught errors and silently stored `'[Decryption failed]'` as a string (indistinguishable at a glance from a real message containing that text, and the catch block swallowed the error with no logging). The fix introduces a `DECRYPT_FAILED` sentinel (`'\x00DECRYPT_FAILED\x00'` — a value no real message could contain) stored in `decryptedMap`. `MessageRow` checks for this sentinel and renders `'⚠ Failed to decrypt'` as the content, making genuine failures visually distinct from the loading `...` state. Errors are now also logged to `console.error` with the message ID and full error object for debuggability.
+
+- **Improved import:** `isCached` is now imported from `decryptionCache.ts` alongside `getCachedDecryption`.
+
+### How it was verified
+
+- Scrolled end-to-end (top→bottom and bottom→top) through a 574-message test chat; every message resolved to real decrypted content when scrolled into view.
+- No message remained permanently on `...`.
+- Deliberately corrupted a stored `encryptedContent` value in DevTools IndexedDB → the affected message showed `⚠ Failed to decrypt` (distinct from `...`) and a `console.error` was logged with the message ID and error details.
+- `npm run lint`, `npm run typecheck`, `npm run build` all pass with zero errors or warnings.
+
+---
+
+## Phase 4 — Search (Full-Text + Local Semantic AI)
+
+**Date:** 2026-08-13
+**Branch:** `feature/search-schema` → merged to `develop`
+
+### What was built
+
+Phase 4 adds full-archive keyword search via MiniSearch and embedding-based semantic search via Transformers.js (`Xenova/all-MiniLM-L6-v2`), both running entirely in the browser at zero API cost.
+
+### Database schema change
+
+- **Version 6** added the `embeddings` table to Dexie: `{ id?, messageId, encryptedVector, iv, modelVersion }`.
+  - Indexed on `messageId` (O(1) lookup) and `modelVersion` (stale-vector detection on model upgrade).
+  - SECURITY NOTE: embedding vectors are derived from plaintext message content and are therefore treated as sensitive. They are AES-256-GCM encrypted with the vault key before storage. The plaintext `Float32Array` lives only in session memory, never on disk.
+
+### Full-text search
+
+- **`src/types/search.ts`** — Shared type definitions: `SearchResult`, `SearchMode`, `IndexableMessage`, `EmbeddingEntry`, and the complete worker message protocol types for both workers.
+- **`src/workers/fulltextIndex.worker.ts`** — Web Worker that builds and queries an in-memory MiniSearch index. Receives pre-decrypted `IndexableMessage[]` from the main thread (decryption happens in the main thread using the existing `decrypt()` function). Supports BM25 scoring, fuzzy matching (`fuzz=0.2`), and prefix queries. Returns `SearchResult[]` with character-level highlight ranges computed from query term positions.
+- **`src/lib/search/fulltextIndex.ts`** — Main-thread wrapper: manages worker lifecycle, decrypts all messages (with concurrency limit of 50 parallel calls to avoid OOM), sends them to the worker, and routes search queries. Exposes `buildFulltextIndex(key)`, `searchFulltext(query)`, `isFulltextReady()`, `clearFulltextIndex()`.
+
+### Semantic search
+
+- **`src/workers/embedding.worker.ts`** — Web Worker using `@huggingface/transformers`. Loads `Xenova/all-MiniLM-L6-v2` (quantized `q8`, ~23 MB download, cached by browser after first load). Generates 384-dimensional float32 embedding vectors using the pipeline's built-in `pooling: 'mean', normalize: true` — no manual pooling code needed. Transfers `Float32Array` buffers back to the main thread for encryption (zero-copy transfer). Also handles query embedding on demand.
+- **`src/lib/search/semanticIndex.ts`** — Main-thread module handling: (1) **Generation**: finds un-embedded messages, decrypts their content, sends to embedding worker in batches of 64, receives vectors, encrypts them, stores in `db.embeddings`. (2) **Session load**: on unlock, reads all stored `EmbeddingEntry` rows for the current model version, decrypts them into an in-memory `Float32Array[]`. (3) **Search**: embeds the query via worker, computes cosine similarity against the in-memory vector store (O(n) dot products — vectors are already L2-normalized), returns top-K results. Exposes `loadEmbeddingSession(key)`, `generateMissingEmbeddings(key)`, `searchSemantic(query, topK, key)`, `clearSemanticIndex()`.
+- Embedding generation is **resumable**: on subsequent unlocks, only messages without an existing `embeddings` row (for the current `modelVersion`) are processed. Re-importing a chat triggers generation only for newly added messages.
+
+### Search store
+
+- **`src/stores/searchStore.ts`** — New Zustand store (session-only, not persisted): `isSearchOpen`, `fulltextStatus`, `embeddingStatus`, `embeddingDone`, `embeddingTotal`. Cleared via `clearSearch()` on vault lock.
+
+### Search UI
+
+- **`src/modules/search/SearchPanel.tsx`** — Full-screen overlay panel (backdrop blur, slide-in modal) with:
+  - Single search input with autofocus and Escape-to-close.
+  - Mode toggle: `keyword` | `semantic` | `both`.
+  - Results list (up to 50) with: chat title, sender, date, snippet. Keyword results show inline character-level highlight marks (`<mark>`). Semantic results show a "✨ semantic" badge. In `both` mode, sections are grouped separately.
+  - Live semantic indexing progress indicator when embedding is incomplete.
+  - Click navigates to the correct message in its chat.
+- **`src/modules/viewer/MessageList.tsx`** — Added `scrollToMessageId` and `onScrollToComplete` props. When set, uses `virtualizer.scrollToIndex()` to scroll to the target message row (`align: 'center'`) and shows a 2-second amber ring highlight (`ring-2 ring-amber-400/70`) via the new `isHighlighted` prop on `MessageRow`.
+- **`src/modules/viewer/ChatViewer.tsx`** — Added search icon button in the chat header (triggers `openSearch()`), and accepts + forwards `scrollToMessageId`/`onScrollToComplete` to `MessageList`.
+- **`src/App.tsx`** — Major additions:
+  - Global **Ctrl+K / Cmd+K** keyboard shortcut opens the search panel.
+  - Search button with shortcut hint in the top bar.
+  - After unlock, eagerly calls `buildFulltextIndex(derivedKey)` and `loadEmbeddingSession(derivedKey)` → `generateMissingEmbeddings(derivedKey)` in background.
+  - After import completes (`importStatus === 'complete'`), triggers re-index for newly imported messages.
+  - `handleSearchNavigate(chatId, messageId)`: selects the chat, then sets `pendingScrollMessageId` after a 100 ms delay to let the chat load.
+  - Renders `<SearchPanel onNavigate={handleSearchNavigate} />` as a global overlay.
+
+### Lock/session integration
+
+- **`src/stores/viewerStore.ts`** — `clearViewer()` now also calls `clearFulltextIndex()` and `clearSemanticIndex()`. This terminates both workers (no plaintext survives in worker memory) and clears the in-memory vector store. The encrypted Dexie rows remain intact for the next session.
+
+### PWA config change
+
+- **`vite.config.ts`** — Added `workbox.globIgnores: ['**/*.wasm']` and raised `maximumFileSizeToCacheInBytes` to 25 MB. The ONNX runtime WASM file from `@huggingface/transformers` is ~23.6 MB and is not appropriate to precache in the service worker; it is served via normal HTTP caching instead.
+
+### New dependencies
+
+- `minisearch` — BM25 in-memory full-text search, zero dependency, browser-safe.
+- `@huggingface/transformers` — Transformers.js v3, the officially maintained successor to `@xenova/transformers`. Same API and model support.
+
+### Architecture tradeoffs
+
+| Concern                   | Decision                                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Keyword index persistence | In-memory only. Rebuilt from scratch after each unlock (~1-2s for 5k msgs). Zero additional storage cost.                                 |
+| Embedding persistence     | Encrypted at rest in Dexie `embeddings` table. Decrypted to memory on unlock. Resumable generation.                                       |
+| Indexing thread           | Both MiniSearch build and embedding generation run in dedicated Web Workers to avoid blocking the UI.                                     |
+| Embedding compute         | `q8` quantized model (~23 MB first download, zero-cost thereafter). Runs entirely on-device via WASM.                                     |
+| Search sensitivity        | Both keyword and semantic indexes contain or are derived from message plaintext. Treated as equally sensitive to the messages themselves. |
+
+### How it was verified
+
+- `npm run lint`, `npm run typecheck`, `npm run build` all pass with zero errors.
+- Build output confirms both workers compile to separate chunks (`fulltextIndex.worker.js`, `embedding.worker.js`).
+- `db.embeddings` table confirmed in DevTools → IndexedDB → ConversationOSDatabase (v6 schema).
+- Vault lock → `clearViewer()` → search panel closes immediately, indexes cleared, workers terminated.
+- Unlock → fulltext index rebuilds in background; `embeddingStatus` transitions from `idle` → `loading-model` → `indexing` → `ready`.
