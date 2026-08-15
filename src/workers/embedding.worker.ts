@@ -53,7 +53,7 @@ async function loadModel(): Promise<FeatureExtractionPipeline> {
     dtype: 'q8',
     progress_callback: (data: {
       status: string
-      file: string
+      file?: string
       progress?: number
       loaded?: number
       total?: number
@@ -61,7 +61,7 @@ async function loadModel(): Promise<FeatureExtractionPipeline> {
       if (data.status === 'progress' || data.status === 'downloading') {
         self.postMessage({
           type: 'modelProgress',
-          file: data.file,
+          file: data.file ?? 'unknown',
           progress: data.progress ?? 0,
           loaded: data.loaded ?? 0,
           total: data.total ?? 0,
